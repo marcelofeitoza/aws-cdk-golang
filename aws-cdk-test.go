@@ -1,8 +1,14 @@
 package main
 
 import (
+	"log"
+	"os"
+
 	"github.com/aws/aws-cdk-go/awscdk/v2"
-	// "github.com/aws/aws-cdk-go/awscdk/v2/awssqs"
+	"github.com/aws/aws-cdk-go/awscdk/v2/awsautoscaling"
+	"github.com/aws/aws-cdk-go/awscdk/v2/awsec2"
+	"github.com/aws/aws-cdk-go/awscdk/v2/awselasticloadbalancingv2"
+	"github.com/aws/aws-cdk-go/awscdk/v2/awsrds"
 	"github.com/aws/constructs-go/constructs/v10"
 	"github.com/aws/jsii-runtime-go"
 )
@@ -18,12 +24,65 @@ func NewAwsCdkTestStack(scope constructs.Construct, id string, props *AwsCdkTest
 	}
 	stack := awscdk.NewStack(scope, &id, &sprops)
 
-	// The code that defines your stack goes here
+	// Create a VPC
+	vpc := awsec2.NewVpc(stack, jsii.String("MyVPC"), &awsec2.VpcProps{
+		Cidr:   jsii.String("10.1.0.0/16"),
+		MaxAzs: jsii.Number(2),
+		SubnetConfiguration: &[]*awsec2.SubnetConfiguration{
+			{
+				SubnetType: awsec2.SubnetType_PUBLIC,
+				Name:       jsii.String("Public"),
+				CidrMask:   jsii.Number(24),
+			},
+			{
+				SubnetType: awsec2.SubnetType_PRIVATE_WITH_EGRESS,
+				Name:       jsii.String("Private"),
+				CidrMask:   jsii.Number(24),
+			},
+		},
+	})
 
-	// example resource
-	// queue := awssqs.NewQueue(stack, jsii.String("AwsCdkTestQueue"), &awssqs.QueueProps{
-	// 	VisibilityTimeout: awscdk.Duration_Seconds(jsii.Number(300)),
-	// })
+	// Create an RDS Database
+	awsrds.NewDatabaseInstance(stack, jsii.String("MyDatabase"), &awsrds.DatabaseInstanceProps{
+		Engine: awsrds.DatabaseInstanceEngine_Postgres(&awsrds.PostgresInstanceEngineProps{
+			Version: awsrds.PostgresEngineVersion_VER_12_15(),
+		}),
+		InstanceType: awsec2.InstanceType_Of(awsec2.InstanceClass_BURSTABLE3, awsec2.InstanceSize_MICRO),
+		Vpc:          vpc,
+	})
+
+	// Create EC2 Instance
+	_ = awsautoscaling.NewAutoScalingGroup(stack, jsii.String("ASG"), &awsautoscaling.AutoScalingGroupProps{
+		Vpc:          vpc,
+		InstanceType: awsec2.InstanceType_Of(awsec2.InstanceClass_BURSTABLE2, awsec2.InstanceSize_MICRO),
+		MachineImage: awsec2.NewAmazonLinuxImage(nil),
+		MinCapacity:  jsii.Number(1),
+		MaxCapacity:  jsii.Number(2),
+	})
+
+	// Create an Elastic Load Balancer
+	lb := awselasticloadbalancingv2.NewApplicationLoadBalancer(stack, jsii.String("LB"), &awselasticloadbalancingv2.ApplicationLoadBalancerProps{
+		Vpc:            vpc,
+		InternetFacing: jsii.Bool(true),
+	})
+
+	// Add listeners and targets
+	listener := lb.AddListener(jsii.String("Listener"), &awselasticloadbalancingv2.BaseApplicationListenerProps{
+		Port: jsii.Number(8080),
+	})
+
+	listener.AddTargets(jsii.String("Target"), &awselasticloadbalancingv2.AddApplicationTargetsProps{
+		Port: jsii.Number(8080),
+		Targets: &[]awselasticloadbalancingv2.IApplicationLoadBalancerTarget{
+			awsautoscaling.NewAutoScalingGroup(stack, jsii.String("ASGTargetGroup"), &awsautoscaling.AutoScalingGroupProps{
+				Vpc:          vpc,
+				InstanceType: awsec2.InstanceType_Of(awsec2.InstanceClass_BURSTABLE2, awsec2.InstanceSize_MICRO),
+				MachineImage: awsec2.NewAmazonLinuxImage(nil),
+				MinCapacity:  jsii.Number(1),
+				MaxCapacity:  jsii.Number(2),
+			}),
+		},
+	})
 
 	return stack
 }
@@ -34,7 +93,7 @@ func main() {
 	app := awscdk.NewApp(nil)
 
 	NewAwsCdkTestStack(app, "AwsCdkTestStack", &AwsCdkTestStackProps{
-		awscdk.StackProps{
+		StackProps: awscdk.StackProps{
 			Env: env(),
 		},
 	})
@@ -42,29 +101,16 @@ func main() {
 	app.Synth(nil)
 }
 
-// env determines the AWS environment (account+region) in which our stack is to
-// be deployed. For more information see: https://docs.aws.amazon.com/cdk/latest/guide/environments.html
 func env() *awscdk.Environment {
-	// If unspecified, this stack will be "environment-agnostic".
-	// Account/Region-dependent features and context lookups will not work, but a
-	// single synthesized template can be deployed anywhere.
-	//---------------------------------------------------------------------------
-	return nil
+	account := os.Getenv("CDK_DEFAULT_ACCOUNT")
+	region := os.Getenv("CDK_DEFAULT_REGION")
 
-	// Uncomment if you know exactly what account and region you want to deploy
-	// the stack to. This is the recommendation for production stacks.
-	//---------------------------------------------------------------------------
-	// return &awscdk.Environment{
-	//  Account: jsii.String("123456789012"),
-	//  Region:  jsii.String("us-east-1"),
-	// }
+	if account == "" || region == "" {
+		log.Fatal("Both CDK_DEFAULT_ACCOUNT and CDK_DEFAULT_REGION must be set")
+	}
 
-	// Uncomment to specialize this stack for the AWS Account and Region that are
-	// implied by the current CLI configuration. This is recommended for dev
-	// stacks.
-	//---------------------------------------------------------------------------
-	// return &awscdk.Environment{
-	//  Account: jsii.String(os.Getenv("CDK_DEFAULT_ACCOUNT")),
-	//  Region:  jsii.String(os.Getenv("CDK_DEFAULT_REGION")),
-	// }
+	return &awscdk.Environment{
+		Account: jsii.String(account),
+		Region:  jsii.String(region),
+	}
 }
